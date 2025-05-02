@@ -1,49 +1,42 @@
 ####################################################################
 # CS:APP Proxy Lab
 #
-# Student Source Files
+# 학생 소스 파일
 ####################################################################
 
-This directory contains the files you will need for the CS:APP Proxy
-Lab.
+이 디렉토리에는 CS:APP Proxy Lab을 수행하는 데 필요한 파일들이 들어 있습니다.
 
-proxy.c
-csapp.h
-csapp.c
-    These are starter files.  csapp.c and csapp.h are described in
-    your textbook. 
+proxy.c  
+csapp.h  
+csapp.c  
+    이 파일들은 시작 코드입니다. `csapp.c`와 `csapp.h`는 교재에서 설명되어 있습니다.
 
-    You may make any changes you like to these files.  And you may
-    create and handin any additional files you like.
+    이 파일들을 자유롭게 수정해도 됩니다. 또한 새로운 파일을 생성하고 제출해도 됩니다.
 
-    Please use `port-for-user.pl' or 'free-port.sh' to generate
-    unique ports for your proxy or tiny server. 
+    프록시나 타이니 서버용으로 고유한 포트를 생성할 때는 `port-for-user.pl` 또는 `free-port.sh`를 사용하세요.
 
-Makefile
-    This is the makefile that builds the proxy program.  Type "make"
-    to build your solution, or "make clean" followed by "make" for a
-    fresh build. 
+Makefile  
+    프록시 프로그램을 빌드하는 Makefile입니다.  
+    `"make"`를 입력하면 여러분의 솔루션이 빌드됩니다.  
+    또는 `"make clean"` 후 `"make"`를 입력하면 깨끗한 상태에서 다시 빌드할 수 있습니다.
 
-    Type "make handin" to create the tarfile that you will be handing
-    in. You can modify it any way you like. Your instructor will use your
-    Makefile to build your proxy from source.
+    `"make handin"`을 입력하면 제출할 tar 파일이 생성됩니다.  
+    Makefile은 자유롭게 수정할 수 있으며, 여러분의 프록시를 소스 코드로부터 빌드할 때 사용됩니다.
 
-port-for-user.pl
-    Generates a random port for a particular user
-    usage: ./port-for-user.pl <userID>
+port-for-user.pl  
+    특정 사용자에게 랜덤한 포트를 생성해 주는 스크립트입니다.  
+    사용법: `./port-for-user.pl <userID>`
 
-free-port.sh
-    Handy script that identifies an unused TCP port that you can use
-    for your proxy or tiny. 
-    usage: ./free-port.sh
+free-port.sh  
+    프록시나 타이니 서버에서 사용할 수 있는 사용되지 않은 TCP 포트를 찾아주는 편리한 스크립트입니다.  
+    사용법: `./free-port.sh`
 
-driver.sh
-    The autograder for Basic, Concurrency, and Cache.        
-    usage: ./driver.sh
+driver.sh  
+    기본 기능, 동시성, 캐시 기능을 위한 오토그레이더입니다.  
+    사용법: `./driver.sh`
 
-nop-server.py
-     helper for the autograder.         
+nop-server.py  
+    오토그레이더를 위한 보조 서버입니다.
 
-tiny
-    Tiny Web server from the CS:APP text
-
+tiny  
+    CS:APP 교재에 나오는 Tiny 웹 서버입니다.
