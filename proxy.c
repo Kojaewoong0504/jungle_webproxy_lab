@@ -17,7 +17,7 @@ typedef struct {
   cache_block_t *head;
   cache_block_t *tail;
   int total_size;
-  pthread_mutex_t lock;
+  pthread_rwlock_t lock;
 } cache_list_t;
 
 void doit(int fd);
@@ -71,57 +71,94 @@ void cache_init(){
   cache.head = NULL;
   cache.tail = NULL;
   cache.total_size = 0;
-  pthread_mutex_init(&cache.lock, NULL);
+  pthread_rwlock_init(&cache.lock, NULL);
 }
 
-char *cache_find(const char *uri, int *size_out){
-  pthread_mutex_lock(&cache.lock);
-  cache_block_t *p = cache.head;
-  while (p){
-    if (strcmp(p->uri, uri) == 0){
-      if (p != cache.head){
-        // remove p
-        if (p->prev) p->prev->next = p->next;
-        if (p->next) p->next->prev = p->prev;
-        if (p == cache.tail) cache.tail = p->prev;
-        // insert p at head
-        p->next = cache.head;
-        p->prev = NULL;
-        cache.head->prev = p;
-        cache.head = p;
-      }
-      *size_out = p->size;
-      pthread_mutex_unlock(&cache.lock);
-      return p->object;
+char *cache_find(const char *uri, int *size_out) {
+  cache_block_t *p;
+
+  // 1. 읽기 락 먼저 획득
+  pthread_rwlock_rdlock(&cache.lock);
+
+  // 2. URI를 찾기
+  p = cache.head;
+  while (p) {
+    if (strcmp(p->uri, uri) == 0) {
+      break;
     }
     p = p->next;
   }
-  pthread_mutex_unlock(&cache.lock);
-  return NULL;
+
+  // 3. 못 찾았으면 종료
+  if (!p) {
+    pthread_rwlock_unlock(&cache.lock);
+    return NULL;
+  }
+
+  // 4. 찾았지만 LRU 갱신은 쓰기 작업 → 락 승격 필요
+  pthread_rwlock_unlock(&cache.lock);       // 읽기 락 해제
+  pthread_rwlock_wrlock(&cache.lock);       // 쓰기 락 획득
+
+  // 5. 다시 찾아야 함 (잠금 사이에 다른 스레드가 변경했을 수 있음)
+  p = cache.head;
+  while (p) {
+    if (strcmp(p->uri, uri) == 0) {
+      break;
+    }
+    p = p->next;
+  }
+
+  if (!p) {
+    pthread_rwlock_unlock(&cache.lock);
+    return NULL;
+  }
+
+  // 6. LRU 업데이트
+  if (p != cache.head) {
+    if (p->prev) p->prev->next = p->next;
+    if (p->next) p->next->prev = p->prev;
+    if (p == cache.tail) cache.tail = p->prev;
+
+    p->next = cache.head;
+    p->prev = NULL;
+    if (cache.head) cache.head->prev = p;
+    cache.head = p;
+  }
+
+  // 7. 캐시 데이터 복사해서 반환 (락 해제 후에도 유효해야 하므로)
+  char *copy = malloc(p->size);
+  memcpy(copy, p->object, p->size);
+  *size_out = p->size;
+
+  pthread_rwlock_unlock(&cache.lock);
+  return copy;
 }
+
 
 // 새 응답 객체를 캐시에 저장. 용량 초과 시 LRU 제거
 void cache_insert(const char *uri, const char *buf, int size){
-  if(size > MAX_OBJECT_SIZE) return;
+  if (size > MAX_OBJECT_SIZE) return;
 
-  pthread_mutex_lock(&cache.lock);
-  // LRU 제거
+  pthread_rwlock_wrlock(&cache.lock); // 🔒 WRLOCK (쓰기 단독 허용)
+
+  // LRU 제거: 필요 시 용량 확보
   while (cache.total_size + size > MAX_CACHE_SIZE){
     cache_block_t *old = cache.tail;
     if (old == NULL) break;
+
     cache.tail = old->prev;
-    if (cache.tail){
+    if (cache.tail) {
       cache.tail->next = NULL;
-    }
-    else{
+    } else {
       cache.head = NULL;
-    } 
+    }
 
     cache.total_size -= old->size;
     free(old->object);
     free(old);
   }
-  // 새 블록 할당
+
+  // 새 블록 생성
   cache_block_t *new_block = malloc(sizeof(cache_block_t));
   strcpy(new_block->uri, uri);
   new_block->object = malloc(size);
@@ -136,8 +173,10 @@ void cache_insert(const char *uri, const char *buf, int size){
   if (cache.tail == NULL) cache.tail = new_block;
 
   cache.total_size += size;
-  pthread_mutex_unlock(&cache.lock);
+
+  pthread_rwlock_unlock(&cache.lock); // 🔓 UNLOCK
 }
+
 
 
 void *thread(void *vargp){
@@ -177,8 +216,9 @@ void doit(int fd){
   char *cached_obj = cache_find(uri, &cached_size);
   if (cached_obj) {
       Rio_writen(fd, cached_obj, cached_size);
+      free(cached_obj); // 복사본이므로 사용 후 해제해야 메모리 누수 방지
       return;
-  }
+  }  
 
   if (strcasecmp(method, "GET") != 0) { 
     // GET외 다른 HTTP 메소드는 지원하지 않는다. 대소문자 구분 없이 비교 strcasecmp
