@@ -37,7 +37,7 @@ int main(int argc, char **argv)
     주어진 포트 번호로 소켓 생성 + 바인딩 + 리스닝을 한 번에 수행
     반환된 listenfd는 클라이언트 연결 요청을 수락할 준비가 된 소켓
   */
-  listenfd = Open_listenfd(argv[1]);
+  listenfd = Open_listenfd(argv[1]); 
   while (1)
   {
     clientlen = sizeof(clientaddr); // accept()에 넘길 주소 버퍼의 크기를 설정
