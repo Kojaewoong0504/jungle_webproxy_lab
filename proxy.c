@@ -12,6 +12,7 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
 void parse_uri(char *uri, char *hostname, char *port, char *paht);
 void forward_response(int servedf, int fd);
 void reassemble(char *req, char *path, char *hostname, char *other_header);
+void *thread(void *vargp);
 
 
  /* You won't lose style points for including this long line in your code */
@@ -38,10 +39,25 @@ int main(int argc, char **argv)
       Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
       printf("Accepted connection from (%s, %s)\n", hostname, port);
 
-      doit(connfd);
-      Close(connfd);
+      int *connfdp = malloc(sizeof(int));
+      *connfdp = connfd;
+      pthread_t tid;
+      pthread_create(&tid, NULL, thread, connfdp);
+
     }
  }
+
+void *thread(void *vargp){
+  int connfd = *((int *)vargp);
+  free(vargp);
+  pthread_detach(pthread_self());
+
+  doit(connfd);
+  Close(connfd);
+  return NULL;
+} 
+
+
 
 void doit(int fd){
   char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
