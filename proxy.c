@@ -102,13 +102,13 @@ void reassemble(char *req, char *path, char *hostname, char *other_header){
 
 void forward_response(int servedf, int fd){
   rio_t serve_rio;
-  char response_buf[MAXLINE];
+  char response_buf[MAXBUF];
 
   Rio_readinitb(&serve_rio, servedf);
   ssize_t n;
-  while ((n = Rio_readlineb(&serve_rio, response_buf, MAXLINE)) > 0){
+  while ((n = Rio_readnb(&serve_rio, response_buf, MAXBUF)) > 0) {
     Rio_writen(fd, response_buf, n);
-  }
+  }  
 }
 
 
