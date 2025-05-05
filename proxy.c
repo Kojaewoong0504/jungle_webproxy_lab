@@ -1,18 +1,41 @@
 #include <stdio.h>
 #include "csapp.h"
- 
- /* Recommended max cache and object sizes */
- #define MAX_CACHE_SIZE 1049000
- #define MAX_OBJECT_SIZE 102400
- 
-/* 사용 함수 정의 부 */
+
+#define MAX_CACHE_SIZE 1049000
+#define MAX_OBJECT_SIZE 102400
+
+
+/* Cache structures */
+typedef struct cache_block{
+  char uri[MAXLINE];
+  char *object;
+  int size;
+  struct cache_block *prev;
+  struct cache_block *next;
+}cache_block_t;
+
+typedef struct{
+  cache_block_t *head;
+  cache_block_t *tail;
+  int total_size;
+  pthread_rwlock_t lock;
+}cache_list_t;
+
+cache_list_t cache;
+
+
 void doit(int fd);
 void read_requesthdrs(rio_t *rp, char *host_header, char *other_header);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
 void parse_uri(char *uri, char *hostname, char *port, char *paht);
-void forward_response(int servedf, int fd);
 void reassemble(char *req, char *path, char *hostname, char *other_header);
 void *thread(void *vargp);
+void cache_init();
+void cache_move_to_end(cache_list_t *cache, cache_block_t *node);
+void cache_evict(cache_list_t *cache, int size_needed);
+void cache_insert(cache_list_t *cache, const char *uri, const char *object, int size);
+int cache_find(cache_list_t *cache, const char *uri, char *object_buf, int *size_buf);
+
 
 
  /* You won't lose style points for including this long line in your code */
@@ -33,6 +56,7 @@ int main(int argc, char **argv)
     }
     
     listenfd = Open_listenfd(argv[1]);
+    cache_init();
     while(1){
       clientlen = sizeof(clientaddr);
       connfd = Accept(listenfd,(SA *)&clientaddr, &clientlen);
@@ -47,6 +71,127 @@ int main(int argc, char **argv)
     }
  }
 
+void cache_init(){
+  cache.head = NULL;
+  cache.tail = NULL;
+  cache.total_size = 0;
+  pthread_rwlock_init(&cache.lock, NULL);
+}
+
+void cache_move_to_end(cache_list_t *cache, cache_block_t *node){
+  if (cache->tail == node) return;
+
+  if (node->prev){
+    node->prev->next = node->next;
+  } else{
+    cache->head = node->next;
+  }
+
+  if (node->next){
+    node->next->prev = node->prev;
+  }else{
+    cache->tail = node->prev;
+  }
+
+  node->prev = cache->tail;
+  node->next = NULL;
+
+  if (cache->tail){
+    cache->tail->next = node;
+  }else{
+    cache->head = node;
+  }
+
+  cache->tail = node;
+}
+
+void cache_evict(cache_list_t *cache, int size_needed){
+  while (cache->total_size + size_needed > MAX_CACHE_SIZE){
+    if (cache->head == NULL) return;
+
+    cache_block_t *oldest = cache->head;
+
+    cache->head = oldest->next;
+    if (cache->head){
+      cache->head->prev = NULL;
+    }else{
+      cache->tail = NULL;
+    }
+
+    cache->total_size -= oldest->size;
+
+    free(oldest->object);
+    free(oldest);
+  }
+}
+
+
+void cache_insert(cache_list_t *cache, const char *uri, const char *object, int size){
+  if (size > MAX_OBJECT_SIZE){
+    return;
+  }
+
+  pthread_rwlock_wrlock(&cache->lock);
+
+  cache_evict(cache, size);
+
+  cache_block_t *new_block = malloc(sizeof(cache_block_t));
+  if (!new_block){
+    pthread_rwlock_unlock(&cache->lock);
+    return;
+  }
+
+  strncpy(new_block->uri, uri, MAXLINE - 1);
+  new_block->uri[MAXLINE - 1] = '\0';
+
+  new_block->object = malloc(size);
+  if (!new_block->object){
+    free(new_block);
+    pthread_rwlock_unlock(&cache->lock);
+    return;
+  }
+
+  memcpy(new_block->object, object, size);
+  new_block->size = size;
+
+  new_block->prev = cache->tail;
+  new_block->next = NULL;
+
+  if (cache->tail){
+    cache->tail->next = new_block;
+  } else{
+    cache->head = new_block;
+  }
+
+  cache->tail = new_block;
+  cache->total_size += size;
+
+  pthread_rwlock_unlock(&cache->lock);
+}
+
+int cache_find(cache_list_t *cache, const char *uri, char *object_buf, int *size_buf){
+  pthread_rwlock_rdlock(&cache->lock);
+
+  cache_block_t *node = cache->head;
+  while (node){
+    if(strcmp(node->uri, uri) == 0){
+      pthread_rwlock_unlock(&cache->lock);
+      pthread_rwlock_wrlock(&cache->lock);
+
+      cache_move_to_end(cache, node);
+      memcpy(object_buf, node->object, node->size);
+      *size_buf = node->size;
+
+      pthread_rwlock_unlock(&cache->lock);
+      return 1;
+    }
+    node = node->next;
+  }
+
+  pthread_rwlock_unlock(&cache->lock);
+  return 0;
+}
+
 void *thread(void *vargp){
   int connfd = *((int *)vargp);
   free(vargp);
@@ -58,29 +203,62 @@ void *thread(void *vargp){
 } 
 
 
-
 void doit(int fd){
   char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
   char host_header[MAXLINE], other_header[MAXLINE];
   char hostname[MAXLINE], port[MAXLINE], path[MAXLINE];
-  char reqest_buf[MAXLINE];
+  char request_buf[MAXLINE];
   rio_t rio;
 
   Rio_readinitb(&rio, fd);
   Rio_readlineb(&rio, buf, MAXLINE);
-  printf("Request headers:\n");
-  printf("%s", buf);
+  printf("Request headers:\n%s", buf);
   sscanf(buf, "%s %s %s", method, uri, version);
+
   if (strcasecmp(method, "GET") != 0){
     clienterror(fd, method, "501", "Not implemented", "This Server does not implement this method");
     return;
   }
+
   read_requesthdrs(&rio, host_header, other_header);
   parse_uri(uri, hostname, port, path);
+
+  /* 캐시 관련 함수 추가 */
+  char cache_buf[MAX_OBJECT_SIZE];
+  int cache_size;
+  if (cache_find(&cache, uri, cache_buf, &cache_size)) {
+    Rio_writen(fd, cache_buf, cache_size);
+    return;
+  }
+
   int servedf = Open_clientfd(hostname, port);
-  reassemble(reqest_buf, path, hostname, other_header);
-  Rio_writen(servedf, reqest_buf, strlen(reqest_buf));
-  forward_response(servedf, fd);
+  if (servedf < 0) {
+    clienterror(fd, hostname, "404", "Not found", "Couldn't connect to server");
+    return;
+  }
+
+  reassemble(request_buf, path, hostname, other_header);
+  Rio_writen(servedf, request_buf, strlen(request_buf));
+
+  char response_buf[MAXBUF];
+  char temp_cache[MAX_OBJECT_SIZE];
+  int total_size = 0;
+  rio_t server_rio;
+  Rio_readinitb(&server_rio, servedf);
+  ssize_t n;
+
+  while ((n = Rio_readnb(&server_rio, response_buf, MAXBUF)) > 0) {
+    Rio_writen(fd, response_buf, n);
+    if (total_size + n <= MAX_OBJECT_SIZE) {
+      memcpy(temp_cache + total_size, response_buf, n);
+    }
+    total_size += n;
+  }
+  Close(servedf);
+
+  if (total_size <= MAX_OBJECT_SIZE) {
+    cache_insert(&cache, uri, temp_cache, total_size);
+  }
 }
 
 
