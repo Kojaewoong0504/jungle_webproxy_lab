@@ -189,7 +189,7 @@ void cache_insert(cache_list_t *cache, const char *uri, const char *object, int 
   unsigned int idx = hash_uri(uri);
   new_block->hnext = cache->hash_table[idx];
   cache->hash_table[idx] = new_block;
-  
+
   pthread_rwlock_unlock(&cache->lock);
 }
 
@@ -209,7 +209,7 @@ int cache_find(cache_list_t *cache, const char *uri, char *object_buf, int *size
       pthread_rwlock_unlock(&cache->lock);
       return 1;
     }
-    node = node->next;
+    node = node->hnext;
   }
 
   pthread_rwlock_unlock(&cache->lock);
