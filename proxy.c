@@ -3,6 +3,7 @@
 
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
+#define HASH_SIZE 997  // prime number to avoid collision
 
 
 /* Cache structures */
@@ -12,6 +13,7 @@ typedef struct cache_block{
   int size;
   struct cache_block *prev;
   struct cache_block *next;
+  struct cache_block *hnext;
 }cache_block_t;
 
 typedef struct{
@@ -19,6 +21,7 @@ typedef struct{
   cache_block_t *tail;
   int total_size;
   pthread_rwlock_t lock;
+  cache_block_t *hash_table[HASH_SIZE];
 }cache_list_t;
 
 cache_list_t cache;
@@ -35,7 +38,7 @@ void cache_move_to_end(cache_list_t *cache, cache_block_t *node);
 void cache_evict(cache_list_t *cache, int size_needed);
 void cache_insert(cache_list_t *cache, const char *uri, const char *object, int size);
 int cache_find(cache_list_t *cache, const char *uri, char *object_buf, int *size_buf);
-
+unsigned int hash_uri(const char *uri);
 
 
  /* You won't lose style points for including this long line in your code */
@@ -78,6 +81,16 @@ void cache_init(){
   pthread_rwlock_init(&cache.lock, NULL);
 }
 
+unsigned int hash_uri(const char *uri){
+  unsigned int hash = 5381;
+  int c;
+  while ((c = *uri++)){
+    hash = ((hash << 5) + hash) + c;
+  }
+  return hash % HASH_SIZE;
+}
+
+
 void cache_move_to_end(cache_list_t *cache, cache_block_t *node){
   if (cache->tail == node) return;
 
@@ -108,7 +121,6 @@ void cache_move_to_end(cache_list_t *cache, cache_block_t *node){
 void cache_evict(cache_list_t *cache, int size_needed){
   while (cache->total_size + size_needed > MAX_CACHE_SIZE){
     if (cache->head == NULL) return;
-
     cache_block_t *oldest = cache->head;
 
     cache->head = oldest->next;
@@ -116,6 +128,15 @@ void cache_evict(cache_list_t *cache, int size_needed){
       cache->head->prev = NULL;
     }else{
       cache->tail = NULL;
+    }
+
+    unsigned int idx = hash_uri(oldest->uri);
+    cache_block_t **p = &cache->hash_table[idx];
+    while (*p && *p != oldest){
+      p = &(*p)->hnext;
+    }
+    if (*p){
+      *p = (*p)->hnext;
     }
 
     cache->total_size -= oldest->size;
@@ -162,17 +183,20 @@ void cache_insert(cache_list_t *cache, const char *uri, const char *object, int 
   } else{
     cache->head = new_block;
   }
-
   cache->tail = new_block;
   cache->total_size += size;
 
+  unsigned int idx = hash_uri(uri);
+  new_block->hnext = cache->hash_table[idx];
+  cache->hash_table[idx] = new_block;
+  
   pthread_rwlock_unlock(&cache->lock);
 }
 
 int cache_find(cache_list_t *cache, const char *uri, char *object_buf, int *size_buf){
   pthread_rwlock_rdlock(&cache->lock);
-
-  cache_block_t *node = cache->head;
+  unsigned int idx = hash_uri(uri);
+  cache_block_t *node = cache->hash_table[idx];
   while (node){
     if(strcmp(node->uri, uri) == 0){
       pthread_rwlock_unlock(&cache->lock);
