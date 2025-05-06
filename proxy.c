@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <time.h>
 #include "csapp.h"
 
 #define MAX_CACHE_SIZE 1049000
@@ -22,7 +23,7 @@ typedef struct{
 }cache_list_t;
 
 cache_list_t cache;
-
+int log_fd;
 
 void doit(int fd);
 void read_requesthdrs(rio_t *rp, char *host_header, char *other_header);
@@ -35,7 +36,7 @@ void cache_move_to_end(cache_list_t *cache, cache_block_t *node);
 void cache_evict(cache_list_t *cache, int size_needed);
 void cache_insert(cache_list_t *cache, const char *uri, const char *object, int size);
 int cache_find(cache_list_t *cache, const char *uri, char *object_buf, int *size_buf);
-
+void write_log(const char *client_ip, const char *uri, int response_size, int from_cache);
 
 
  /* You won't lose style points for including this long line in your code */
@@ -45,31 +46,51 @@ static const char *user_agent_hdr =
  
 int main(int argc, char **argv)
 {
-    int listenfd, connfd;
-    char hostname[MAXLINE], port[MAXLINE];
-    socklen_t clientlen;
-    struct sockaddr_storage clientaddr;
+  int listenfd, connfd;
+  char hostname[MAXLINE], port[MAXLINE];
+  socklen_t clientlen;
+  struct sockaddr_storage clientaddr;
 
-    if (argc != 2){
-      fprintf(stderr, "usage: %s <port>\n", argv[0]);
+  if (argc != 2){
+    fprintf(stderr, "usage: %s <port>\n", argv[0]);
+    exit(1);
+  }
+  log_fd = open("proxy.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (log_fd < 0) {
+      perror("open log file");
       exit(1);
-    }
-    
-    listenfd = Open_listenfd(argv[1]);
-    cache_init();
-    while(1){
-      clientlen = sizeof(clientaddr);
-      connfd = Accept(listenfd,(SA *)&clientaddr, &clientlen);
-      Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
-      printf("Accepted connection from (%s, %s)\n", hostname, port);
+  }   
+  listenfd = Open_listenfd(argv[1]);
+  cache_init();
+  while(1){
+    clientlen = sizeof(clientaddr);
+    connfd = Accept(listenfd,(SA *)&clientaddr, &clientlen);
+    Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
+    printf("Accepted connection from (%s, %s)\n", hostname, port);
 
-      int *connfdp = malloc(sizeof(int));
-      *connfdp = connfd;
-      pthread_t tid;
-      pthread_create(&tid, NULL, thread, connfdp);
+    int *connfdp = malloc(sizeof(int));
+    *connfdp = connfd;
+    pthread_t tid;
+    pthread_create(&tid, NULL, thread, connfdp);
 
-    }
- }
+  }
+}
+
+ void write_log(const char *client_ip, const char *uri, int response_size, int from_cache) {
+  char buf[MAXLINE];
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+  int len = snprintf(buf, MAXLINE,
+      "[%04d-%02d-%02d %02d:%02d:%02d] %s %s %d bytes %s\n",
+      t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+      t->tm_hour, t->tm_min, t->tm_sec,
+      client_ip, uri, response_size,
+      from_cache ? "(cache)" : "(network)"
+  );
+  write(log_fd, buf, len);
+}
+
+
 
 void cache_init(){
   cache.head = NULL;
@@ -210,31 +231,66 @@ void doit(int fd){
   char request_buf[MAXLINE];
   rio_t rio;
 
+  // Get client IP
+  char client_ip[MAXLINE] = "unknown";
+  struct sockaddr_storage addr;
+  socklen_t len = sizeof(addr);
+  if (getpeername(fd, (struct sockaddr*)&addr, &len) == 0) {
+      void *ip_ptr = NULL;
+      if (addr.ss_family == AF_INET) {
+          ip_ptr = &((struct sockaddr_in*)&addr)->sin_addr;
+      } else if (addr.ss_family == AF_INET6) {
+          ip_ptr = &((struct sockaddr_in6*)&addr)->sin6_addr;
+      }
+      inet_ntop(addr.ss_family, ip_ptr, client_ip, MAXLINE);
+  }
+
   Rio_readinitb(&rio, fd);
-  Rio_readlineb(&rio, buf, MAXLINE);
+  if (Rio_readlineb(&rio, buf, MAXLINE) <= 0) return;
   printf("Request headers:\n%s", buf);
   sscanf(buf, "%s %s %s", method, uri, version);
 
   if (strcasecmp(method, "GET") != 0){
-    clienterror(fd, method, "501", "Not implemented", "This Server does not implement this method");
-    return;
+      clienterror(fd, method, "501", "Not implemented", "This Server does not implement this method");
+      return;
   }
 
   read_requesthdrs(&rio, host_header, other_header);
   parse_uri(uri, hostname, port, path);
 
-  /* 캐시 관련 함수 추가 */
+  if (strlen(hostname) == 0 && strlen(host_header) > 0) {
+    char *host_start = strchr(host_header, ' ');
+    if (host_start != NULL) {
+        host_start++; // skip space
+        char *host_end = strchr(host_start, '\r');
+        if (host_end) *host_end = '\0';
+
+        char *colon = strchr(host_start, ':');
+        if (colon) {
+            *colon = '\0';
+            strcpy(hostname, host_start);
+            strcpy(port, colon + 1);
+        } else {
+            strcpy(hostname, host_start);
+            strcpy(port, "80");
+          }
+      }
+  }
+
+
+  // 캐시 검사
   char cache_buf[MAX_OBJECT_SIZE];
   int cache_size;
   if (cache_find(&cache, uri, cache_buf, &cache_size)) {
-    Rio_writen(fd, cache_buf, cache_size);
-    return;
+      Rio_writen(fd, cache_buf, cache_size);
+      write_log(client_ip, uri, cache_size, 1);  // ✅ 캐시 HIT
+      return;
   }
 
   int servedf = Open_clientfd(hostname, port);
   if (servedf < 0) {
-    clienterror(fd, hostname, "404", "Not found", "Couldn't connect to server");
-    return;
+      clienterror(fd, hostname, "404", "Not found", "Couldn't connect to server");
+      return;
   }
 
   reassemble(request_buf, path, hostname, other_header);
@@ -248,19 +304,20 @@ void doit(int fd){
   ssize_t n;
 
   while ((n = Rio_readnb(&server_rio, response_buf, MAXBUF)) > 0) {
-    Rio_writen(fd, response_buf, n);
-    if (total_size + n <= MAX_OBJECT_SIZE) {
-      memcpy(temp_cache + total_size, response_buf, n);
-    }
-    total_size += n;
+      Rio_writen(fd, response_buf, n);
+      if (total_size + n <= MAX_OBJECT_SIZE) {
+          memcpy(temp_cache + total_size, response_buf, n);
+      }
+      total_size += n;
   }
   Close(servedf);
 
   if (total_size <= MAX_OBJECT_SIZE) {
-    cache_insert(&cache, uri, temp_cache, total_size);
+      cache_insert(&cache, uri, temp_cache, total_size);
   }
-}
 
+  write_log(client_ip, uri, total_size, 0);  // ✅ 캐시 MISS
+}
 
 void reassemble(char *req, char *path, char *hostname, char *other_header){
   sprintf(req,
