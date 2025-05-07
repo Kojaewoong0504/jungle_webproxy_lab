@@ -58,13 +58,22 @@ int main(int argc, char **argv)
       exit(1);
     }
     
+    // === 로그 파일 설정 ===
+    int logfd = open("proxy.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (logfd < 0) {
+        perror("Failed to open log file");
+        exit(1);
+    }
+    dup2(logfd, STDERR_FILENO);  // stderr -> proxy.log
+    close(logfd); // logfd 자체는 닫아도 무방
+
     listenfd = Open_listenfd(argv[1]);
     cache_init();
     while(1){
       clientlen = sizeof(clientaddr);
       connfd = Accept(listenfd,(SA *)&clientaddr, &clientlen);
       Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
-      printf("Accepted connection from (%s, %s)\n", hostname, port);
+      fprintf("Accepted connection from (%s, %s)\n", hostname, port);
 
       int *connfdp = malloc(sizeof(int));
       *connfdp = connfd;
@@ -235,10 +244,22 @@ void doit(int fd){
   rio_t rio;
 
   Rio_readinitb(&rio, fd);
-  Rio_readlineb(&rio, buf, MAXLINE);
-  printf("Request headers:\n%s", buf);
-  sscanf(buf, "%s %s %s", method, uri, version);
+  // 요청 라인 읽기
+  ssize_t t = Rio_readlineb(&rio, buf, MAXLINE);
+  if (t <= 0) {
+      fprintf(stderr, "[ERROR] Failed to read request line (n=%zd)\n", t);
+      return;
+  }
 
+  fprintf(stderr, "[INFO] Raw request line: %s", buf);
+
+  if (sscanf(buf, "%s %s %s", method, uri, version) != 3) {
+      fprintf(stderr, "[ERROR] Malformed request line: %s", buf);
+      return;
+  }
+
+  fprintf(stderr, "[INFO] Parsed method: %s, URI: %s, Version: %s\n", method, uri, version);
+  
   if (strcasecmp(method, "GET") != 0){
     clienterror(fd, method, "501", "Not implemented", "This Server does not implement this method");
     return;
