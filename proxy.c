@@ -4,6 +4,7 @@
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 #define HASH_SIZE 997  // prime number to avoid collision
+#define LRU_QUEUE_SIZE 1024
 
 
 /* Cache structures */
@@ -21,10 +22,19 @@ typedef struct{
   cache_block_t *tail;
   int total_size;
   pthread_rwlock_t lock;
+  pthread_mutex_t lru_lock;
   cache_block_t *hash_table[HASH_SIZE];
 }cache_list_t;
 
+/* Async LRU update queue */
+typedef struct {
+  cache_block_t *queue[LRU_QUEUE_SIZE];
+  int front, rear;
+  pthread_mutex_t lock;
+} lru_queue_t;
+
 cache_list_t cache;
+lru_queue_t lru_queue;
 
 
 void doit(int fd);
@@ -37,8 +47,10 @@ void cache_init();
 void cache_move_to_end(cache_list_t *cache, cache_block_t *node);
 void cache_evict(cache_list_t *cache, int size_needed);
 void cache_insert(cache_list_t *cache, const char *uri, const char *object, int size);
-int cache_find(cache_list_t *cache, const char *uri, char *object_buf, int *size_buf);
+int cache_find(cache_list_t *cache, const char *uri, char *object_buf, int *size_buf, cache_block_t **hit_block);
 unsigned int hash_uri(const char *uri);
+void *lru_worker(void *arg);
+void enqueue_lru_update(cache_block_t *node);
 
 
  /* You won't lose style points for including this long line in your code */
@@ -83,12 +95,19 @@ int main(int argc, char **argv)
     }
  }
 
-void cache_init(){
+ void cache_init() {
   cache.head = NULL;
   cache.tail = NULL;
   cache.total_size = 0;
   pthread_rwlock_init(&cache.lock, NULL);
+  pthread_mutex_init(&cache.lru_lock, NULL);
+  pthread_mutex_init(&lru_queue.lock, NULL);
+  lru_queue.front = 0;
+  lru_queue.rear = 0;
+  pthread_t tid;
+  pthread_create(&tid, NULL, lru_worker, NULL);
 }
+
 
 unsigned int hash_uri(const char *uri){
   unsigned int hash = 5381;
@@ -202,28 +221,26 @@ void cache_insert(cache_list_t *cache, const char *uri, const char *object, int 
   pthread_rwlock_unlock(&cache->lock);
 }
 
-int cache_find(cache_list_t *cache, const char *uri, char *object_buf, int *size_buf){
+int cache_find(cache_list_t *cache, const char *uri, char *object_buf, int *size_buf, cache_block_t **hit_block) {
   pthread_rwlock_rdlock(&cache->lock);
   unsigned int idx = hash_uri(uri);
   cache_block_t *node = cache->hash_table[idx];
-  while (node){
-    if(strcmp(node->uri, uri) == 0){
-      pthread_rwlock_unlock(&cache->lock);
-      pthread_rwlock_wrlock(&cache->lock);
-
-      cache_move_to_end(cache, node);
+  while (node) {
+    if (strcmp(node->uri, uri) == 0) {
       memcpy(object_buf, node->object, node->size);
       *size_buf = node->size;
-
+      *hit_block = node;
       pthread_rwlock_unlock(&cache->lock);
+      enqueue_lru_update(node);  // async update
       return 1;
     }
     node = node->hnext;
   }
-
   pthread_rwlock_unlock(&cache->lock);
+  *hit_block = NULL;
   return 0;
 }
+
 
 void *thread(void *vargp){
   int connfd = *((int *)vargp);
@@ -271,7 +288,8 @@ void doit(int fd){
   /* 캐시 관련 함수 추가 */
   char cache_buf[MAX_OBJECT_SIZE];
   int cache_size;
-  if (cache_find(&cache, uri, cache_buf, &cache_size)) {
+  cache_block_t *hit_block = NULL;
+  if (cache_find(&cache, uri, cache_buf, &cache_size, &hit_block)) {
     Rio_writen(fd, cache_buf, cache_size);
     return;
   }
@@ -398,4 +416,49 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
   sprintf(buf, "Content-length: %d\r\n\r\n", (int)strlen(body)); 
   Rio_writen(fd, buf, strlen(buf)); // 본문 길이 알려줌 + 빈 줄로 헤더 종료
   Rio_writen(fd, body, strlen(body)); // 위에서 만든 HTML을 클라이언트에게 전송
+}
+
+void *lru_worker(void *arg) {
+  while (1) {
+    cache_block_t *node = NULL;
+    pthread_mutex_lock(&lru_queue.lock);
+    if (lru_queue.front != lru_queue.rear) {
+      node = lru_queue.queue[lru_queue.front];
+      lru_queue.front = (lru_queue.front + 1) % LRU_QUEUE_SIZE;
+    }
+    pthread_mutex_unlock(&lru_queue.lock);
+
+    if (node) {
+      pthread_mutex_lock(&cache.lru_lock);
+      if (node != cache.tail) {
+        if (node->prev) node->prev->next = node->next;
+        else cache.head = node->next;
+
+        if (node->next) node->next->prev = node->prev;
+        else cache.tail = node->prev;
+
+        node->prev = cache.tail;
+        node->next = NULL;
+
+        if (cache.tail) cache.tail->next = node;
+        else cache.head = node;
+
+        cache.tail = node;
+      }
+      pthread_mutex_unlock(&cache.lru_lock);
+    } else {
+      usleep(100);
+    }
+  }
+  return NULL;
+}
+
+void enqueue_lru_update(cache_block_t *node) {
+  pthread_mutex_lock(&lru_queue.lock);
+  int next_rear = (lru_queue.rear + 1) % LRU_QUEUE_SIZE;
+  if (next_rear != lru_queue.front) { // not full
+    lru_queue.queue[lru_queue.rear] = node;
+    lru_queue.rear = next_rear;
+  }
+  pthread_mutex_unlock(&lru_queue.lock);
 }
